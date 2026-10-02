@@ -22,10 +22,11 @@ class NotificationReader : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (sbn.packageName == packageName) return
+        val test = TestNotifications.isTest(sbn, packageName)
+        if (sbn.packageName == packageName && !test) return
         val n = sbn.notification
         val extras = n.extras
-        val latest = extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.lastOrNull() as? android.os.Bundle
+        val latest = extras.getParcelableArray(Notification.EXTRA_MESSAGES, android.os.Bundle::class.java)?.lastOrNull()
         val person = latest?.getParcelable("sender_person", android.app.Person::class.java)
         val sender = person?.name?.toString() ?: latest?.getCharSequence("sender")?.toString()
         val title = sender ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
@@ -35,7 +36,7 @@ class NotificationReader : NotificationListenerService() {
             ?: extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.lastOrNull()?.toString().orEmpty()
         val notice = Notice(sbn.key, sbn.packageName, title.take(200), body.take(4000), sbn.postTime,
             ongoing = n.flags and Notification.FLAG_ONGOING_EVENT != 0,
-            groupSummary = n.flags and Notification.FLAG_GROUP_SUMMARY != 0)
+            groupSummary = n.flags and Notification.FLAG_GROUP_SUMMARY != 0, isTest = test)
         main.post { ReadingService.instance?.offer(notice) }
     }
 

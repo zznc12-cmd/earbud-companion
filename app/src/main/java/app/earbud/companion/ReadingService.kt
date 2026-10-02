@@ -146,12 +146,24 @@ class ReadingService : Service() {
     }
 
     fun offer(n: Notice) {
-        if (!settingsLoaded || !allowed(n) || !routes.current(settings).ready) return
+        val reason = if (!settingsLoaded) "설정을 불러오는 중입니다" else
+            ReadingPolicy.skipReason(n, settings, System.currentTimeMillis(), LocalTime.now(), isScreenOn(), isInCall(), isDnd())
+                ?: routes.current(settings).let { if (it.ready) null else it.label }
+        if (reason != null) {
+            if (n.isTest) app.status.update { it.copy(lastResult = "테스트 알림 건너뜀: $reason") }
+            return
+        }
+        app.status.update { it.copy(lastResult = if (n.isTest) "테스트 알림 수신 · 대기열에 추가" else "새 알림 수신 · 대기열에 추가") }
         if (queue.offer(n)) pump()
     }
 
+    suspend fun refreshVoiceCatalog() {
+        // Never replace an engine while its current utterance is being generated or played.
+        if (activeJob == null) engine.prepare()
+    }
+
     fun remove(key: String) {
-        if (queue.remove(key)) stopCurrent("알림을 지워 낭독을 중단했습니다")
+        if (queue.remove(key, forgetContent = true)) stopCurrent("알림을 지워 낭독을 중단했습니다")
     }
 
     private fun allowed(n: Notice, requireFresh: Boolean = true) = ReadingPolicy.allowed(n, settings, System.currentTimeMillis(),
@@ -194,9 +206,22 @@ class ReadingService : Service() {
             promote(true)
             app.status.update { it.copy(speaking = true, message = if (test) "이어폰 테스트 중" else "알림을 읽는 중") }
             updateNotification()
-            try { task() }
+            try {
+                task()
+                app.status.update { it.copy(message = "낭독을 마쳤습니다", lastResult = "낭독 완료 · ${it.engineLabel}") }
+            }
+            catch (_: TimeoutCancellationException) {
+                val message = "TTS 또는 출력 확인 시간이 초과되었습니다"
+                status(message)
+                app.status.update { it.copy(lastResult = message) }
+            }
             catch (e: CancellationException) { throw e }
-            catch (_: Exception) { status("낭독을 건너뛰었습니다. 음성 설치와 이어폰 출력을 확인하세요") }
+            catch (e: Exception) {
+                val reason = if (e is IllegalStateException) e.message.orEmpty().ifBlank { "음성 생성·출력 확인 실패" }
+                    else "음성 생성·출력 확인 실패"
+                status("낭독 실패: $reason")
+                app.status.update { it.copy(lastResult = "낭독 실패: $reason") }
+            }
             finally {
                 engine.stopAudio()
                 app.status.update { it.copy(speaking = false) }
@@ -220,13 +245,16 @@ class ReadingService : Service() {
         active?.let { queue.remove(it.key) }
         activeJob?.cancel()
         engine.cancel()
+        app.status.update { it.copy(lastResult = message) }
         status(message)
     }
 
     fun stopAll(message: String) {
+        val wasReading = activeJob != null
         queue.clear()
         activeJob?.cancel()
         engine.cancel()
+        if (wasReading) app.status.update { it.copy(lastResult = message) }
         status(message)
     }
 

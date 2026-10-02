@@ -8,11 +8,9 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.update
 import java.io.File
-import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.PI
@@ -20,18 +18,16 @@ import kotlin.math.sin
 
 /** One serialized utterance. The track and focus are synchronously released on cancellation. */
 class SpeechEngine(private val app: CompanionApp, private val routes: HeadphoneRoutes) {
-    private val init = CompletableDeferred<Boolean>()
+    private val session = TtsSession(app)
     private val waits = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     @Volatile private var track: AudioTrack? = null
     private var focus: AudioFocusRequest? = null
-    private val tts = TextToSpeech(app) { code -> init.complete(code == TextToSpeech.SUCCESS) }
     private val audio = routes.audio
     private val tempDir = File(app.cacheDir, "speech").apply {
         mkdirs(); listFiles()?.forEach { it.delete() }
     }
 
-    init {
-        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+    private val progress = object : UtteranceProgressListener() {
             override fun onStart(id: String?) = Unit
             override fun onDone(id: String?) { id?.let { waits.remove(it)?.complete(Unit) } }
             @Deprecated("Legacy callback") override fun onError(id: String?) { fail(id) }
@@ -40,44 +36,39 @@ class SpeechEngine(private val app: CompanionApp, private val routes: HeadphoneR
             private fun fail(id: String?) {
                 id?.let { waits.remove(it)?.completeExceptionally(IllegalStateException("음성 생성 실패")) }
             }
-        })
     }
 
-    private fun offlineVoices(): List<Voice> = runCatching { tts.voices.orEmpty() }.getOrDefault(emptySet()).filter {
-        it.locale.language == "ko" && !it.isNetworkConnectionRequired &&
-            TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features.orEmpty()
-    }.sortedWith(compareByDescending<Voice> { it.quality }.thenBy { it.name })
-
     suspend fun prepare(): Boolean {
-        val initialized = withTimeoutOrNull(15_000) { init.await() } == true
-        val voices = if (initialized) offlineVoices() else emptyList()
-        app.status.update { it.copy(offlineVoiceReady = voices.isNotEmpty(),
-            voices = voices.map { v -> v.name to "${v.locale.displayName} · ${v.name}" }) }
-        return voices.isNotEmpty()
+        val ready = session.prepare()
+        session.client?.setOnUtteranceProgressListener(progress)
+        app.status.update { it.copy(offlineVoiceReady = ready, enginePackage = session.enginePackage,
+            engineLabel = session.engineLabel, voiceLabel = session.chooseVoice(app.settings.state.value.voice)?.name.orEmpty(),
+            voices = session.voices.map { v -> v.name to "${v.locale.displayName} · ${v.name}" }, ttsError = session.error,
+            systemEngineLabel = session.systemEngineLabel, ttsNotice = session.notice) }
+        return ready
     }
 
     suspend fun speak(text: String, settings: ReadSettings, device: AudioDeviceInfo,
                       valid: () -> Boolean) {
-        check(prepare()) { "오프라인 한국어 음성을 설치하세요" }
+        check(prepare()) { session.error }
         currentCoroutineContext().ensureActive()
         check(valid()) { "낭독 조건이 바뀌었습니다" }
-        val voices = offlineVoices()
-        val voice = voices.firstOrNull { it.name == settings.voice } ?: voices.first()
-        check(tts.setVoice(voice) == TextToSpeech.SUCCESS)
-        tts.setLanguage(Locale.KOREA)
-        // setLanguage can replace a voice; select the verified offline voice last.
-        check(tts.setVoice(voice) == TextToSpeech.SUCCESS)
-        tts.setSpeechRate(settings.rate)
+        val tts = session.client!!
+        val voice = session.chooseVoice(settings.voice)!!
+        check(tts.setVoice(voice) == TextToSpeech.SUCCESS) { "선택한 목소리를 적용하지 못했습니다" }
+        check(tts.setSpeechRate(settings.rate) == TextToSpeech.SUCCESS) { "읽기 속도를 적용하지 못했습니다" }
+        app.status.update { it.copy(voiceLabel = voice.name, message = "${session.engineLabel}로 음성 생성 중") }
         val id = UUID.randomUUID().toString()
         val file = File(tempDir, "$id.wav")
         val done = CompletableDeferred<Unit>()
         waits[id] = done
         try {
-            check(tts.synthesizeToFile(text, Bundle(), file, id) == TextToSpeech.SUCCESS)
+            check(tts.synthesizeToFile(text, Bundle(), file, id) == TextToSpeech.SUCCESS) { "TTS 음성 생성을 시작하지 못했습니다" }
             withTimeout(30_000) { done.await() }
             currentCoroutineContext().ensureActive()
             check(valid()) { "취소된 알림입니다" }
             val wave = withContext(Dispatchers.IO) { WaveData.read(file) }
+            app.status.update { it.copy(message = "${session.engineLabel} · 이어폰으로 재생 중") }
             play(wave, device, settings.speechVolume, valid)
         } finally {
             waits.remove(id)?.cancel()
@@ -183,9 +174,9 @@ class SpeechEngine(private val app: CompanionApp, private val routes: HeadphoneR
     }
 
     fun cancel() {
-        tts.stop()
+        session.stop()
         waits.values.forEach { it.cancel() }; waits.clear()
         stopAudio()
     }
-    fun shutdown() { cancel(); tts.shutdown() }
+    fun shutdown() { cancel(); session.shutdown() }
 }

@@ -77,4 +77,35 @@ class ReadingPolicyTest {
         val q = NoticeQueue(); repeat(100) { q.offer(notice(it.toString())) }
         assertEquals(20, q.size); assertEquals("80", q.next()!!.key)
     }
+
+    @Test fun ownTestNotificationUsesAllReadingConditionsExceptAppSelection() {
+        val n = notice().copy(packageName = "app.earbud.companion", isTest = true)
+        val s = settings.copy(apps = emptySet())
+        assertTrue(allowed(n = n, s = s))
+        assertFalse(allowed(n = n, s = s.copy(enabled = false)))
+        assertFalse(allowed(n = n, s = s, call = true))
+        assertFalse(allowed(n = n, s = s, dnd = true))
+        assertFalse(allowed(n = n, s = s.copy(screenOffOnly = true), screen = true))
+        assertFalse(allowed(n = n, s = s.copy(pausedUntil = 4000)))
+    }
+
+    @Test fun skippedTestExplainsWhyAndStillUsesTheConfiguredBodyLength() {
+        val n = notice(body = "가".repeat(150)).copy(isTest = true)
+        val s = settings.copy(maxChars = 60)
+        assertEquals(67, ReadingPolicy.speech(n, s).length)
+        assertEquals("방해금지가 켜져 있습니다", ReadingPolicy.skipReason(n, s, 2000, LocalTime.NOON, false, false, true))
+    }
+
+    @Test fun genuinelyNewIdenticalNotificationAfterRemovalIsReadAgain() {
+        val q = NoticeQueue()
+        q.offer(notice())
+        val old = q.next()!!
+        assertTrue(q.remove("a", forgetContent = true))
+        assertTrue(q.offer(notice()))
+        val new = q.next()!!
+        q.finish(old)
+        assertFalse(q.isCurrent(old))
+        assertTrue(q.isCurrent(new))
+        assertFalse(q.offer(notice())) // Same-content updates are still deduplicated.
+    }
 }

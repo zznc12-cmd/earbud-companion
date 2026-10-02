@@ -11,7 +11,6 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.provider.Telephony
-import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -39,15 +38,36 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
+    private var catalogJob: Job? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { EarbudScreen(application as CompanionApp) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val app = application as CompanionApp
+        catalogJob?.cancel()
+        catalogJob = lifecycleScope.launch {
+            val settings = app.settings.flow.first()
+            if (settings.enabled && ReadingService.instance == null && ReadingService.prerequisites(this@MainActivity)) {
+                runCatching { ReadingService.command(this@MainActivity, ReadingService.START) }
+            }
+            refreshTtsCatalog(app)
+        }
+    }
+
+    override fun onStop() {
+        catalogJob?.cancel()
+        super.onStop()
     }
 }
 
@@ -68,6 +88,7 @@ fun EarbudScreen(app: CompanionApp) {
     var query by remember { mutableStateOf("") }
     var refresh by remember { mutableIntStateOf(0) }
     var uiMessage by remember { mutableStateOf("") }
+    var testBody by remember { mutableStateOf(TestNotifications.DEFAULT_BODY) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh++ }
     fun open(intent: Intent) {
         runCatching { context.startActivity(intent) }.onFailure { uiMessage = "이 설정 화면을 열 수 없습니다. 휴대폰 설정에서 확인하세요." }
@@ -110,16 +131,6 @@ fun EarbudScreen(app: CompanionApp) {
                 .filter { it.packageName != context.packageName }.distinctBy { it.packageName }
                 .sortedWith(compareByDescending<SelectableApp> { it.recommended }.thenBy { it.label })
         }
-        val initialized = CompletableDeferred<Boolean>()
-        val probe = TextToSpeech(context) { initialized.complete(it == TextToSpeech.SUCCESS) }
-        try {
-            if (withTimeoutOrNull(15_000) { initialized.await() } == true) {
-                val voices = probe.voices.orEmpty().filter { it.locale.language == "ko" && !it.isNetworkConnectionRequired &&
-                    TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features.orEmpty() }
-                    .sortedWith(compareByDescending<android.speech.tts.Voice> { it.quality }.thenBy { it.name })
-                app.status.update { it.copy(offlineVoiceReady = voices.isNotEmpty(), voices = voices.map { v -> v.name to v.locale.displayName }) }
-            }
-        } finally { probe.shutdown() }
     }
 
     val colors = lightColorScheme(primary = Color(0xFF235B50), secondary = Color(0xFF596C62),
@@ -187,6 +198,7 @@ fun EarbudScreen(app: CompanionApp) {
                             } }
                             item { InfoCard("선택한 앱 ${settings.apps.size}개", "현재 알림을 실제로 삭제하면 낭독도 중단됩니다. 배너만 위로 숨기는 동작은 아직 검증 전입니다.") {
                                 Button(onClick = { tab = 1 }) { Text("읽어줄 앱 선택") }
+                                OutlinedButton(onClick = { tab = 3 }) { Text("테스트 알림 만들기") }
                                 OutlinedButton(onClick = { runCatching { ReadingService.command(context, ReadingService.TEST) }.onFailure { uiMessage = "블루투스 권한과 출력 장치를 확인하세요." } },
                                     enabled = permissions.bluetooth && permissions.notifications && status.routeReady) { Text("낭독 미리듣기") }
                             } }
@@ -216,6 +228,11 @@ fun EarbudScreen(app: CompanionApp) {
                         }
                         2 -> {
                             item { InfoCard("낭독 소리", "낭독 중 음악·영상의 음량을 낮추도록 요청합니다. 다른 앱에 따라 잠시 멈출 수도 있습니다.") {
+                                Text("TTS 엔진: ${status.engineLabel}")
+                                if (status.ttsNotice.isNotBlank()) Text(status.ttsNotice, style = MaterialTheme.typography.bodySmall)
+                                if (status.voiceLabel.isNotBlank()) Text("목소리: ${status.voiceLabel}", style = MaterialTheme.typography.bodySmall)
+                                TextButton(onClick = { scope.launch { refreshTtsCatalog(app) } }) { Text("TTS 설정 새로고침") }
+                                TextButton(onClick = { open(Intent("com.android.settings.TTS_SETTINGS")) }) { Text("휴대폰 TTS 설정") }
                                 SettingSlider("읽기 속도", settings.rate, .5f..2f, "%.1f배".format(settings.rate)) { v -> change { it.copy(rate = v) } }
                                 SettingSlider("낭독 음량", settings.speechVolume, 0f..1f, "${(settings.speechVolume * 100).roundToInt()}%") { v -> change { it.copy(speechVolume = v) } }
                                 var voiceMenu by remember { mutableStateOf(false) }
@@ -223,10 +240,10 @@ fun EarbudScreen(app: CompanionApp) {
                                     OutlinedButton(onClick = { voiceMenu = true }) { Text(if (settings.voice.isBlank()) "목소리: 기본 한국어" else "목소리: 선택한 한국어 음성") }
                                     DropdownMenu(voiceMenu, onDismissRequest = { voiceMenu = false }) {
                                         DropdownMenuItem(text = { Text("기본 한국어") }, onClick = { change { it.copy(voice = "") }; voiceMenu = false })
-                                        status.voices.forEachIndexed { i, voice -> DropdownMenuItem(text = { Text("한국어 음성 ${i + 1}") }, onClick = { change { it.copy(voice = voice.first) }; voiceMenu = false }) }
+                                        status.voices.forEach { voice -> DropdownMenuItem(text = { Text(voice.second) }, onClick = { change { it.copy(voice = voice.first) }; voiceMenu = false }) }
                                     }
                                 }
-                                if (!status.offlineVoiceReady) Text("오프라인 한국어 음성 설치가 필요합니다.", color = colors.error)
+                                if (status.ttsError.isNotBlank()) Text(status.ttsError, color = colors.error)
                             } }
                             item { InfoCard("연결할 때 미디어 음량", "기본은 기존 음량 유지입니다. 이 옵션을 켜면 이어폰 연결 때 한 번만 지정 음량을 적용합니다.") {
                                 ToggleRow("연결 시 음량 적용", settings.connectionVolume >= 0) { v -> change { it.copy(connectionVolume = if (v) 40 else -1) } }
@@ -246,7 +263,22 @@ fun EarbudScreen(app: CompanionApp) {
                             } }
                         }
                         3 -> {
-                            item { InfoCard("실기기 검증 전 · 미리보기 버전", "기능을 구현했지만 S26·QCY에서 실제 출력과 덕킹, 장시간 대기는 아직 확인하지 못했습니다. 스피커 출력 전환도 민감하지 않은 테스트 알림으로 먼저 확인하세요.") }
+                            item { InfoCard("테스트 알림", "실제 알림센터에 알림을 만듭니다. 알림 읽기를 켜고 이어폰을 연결하세요. 본문 길이·화면 조건·조용한 시간은 실제 알림과 똑같이 적용됩니다.") {
+                                OutlinedTextField(testBody, { if (it.length <= 2000) testBody = it }, label = { Text("테스트 본문") },
+                                    modifier = Modifier.fillMaxWidth(), minLines = 2, maxLines = 4)
+                                Button(onClick = { runCatching { TestNotifications.post(context, testBody) }
+                                    .onFailure { uiMessage = "테스트 알림을 만들지 못했습니다. 앱 알림 권한과 테스트 알림 채널을 확인하세요." } },
+                                    enabled = permissions.notifications && testBody.isNotBlank()) { Text("테스트 알림 1개 만들기") }
+                                OutlinedButton(onClick = { runCatching { TestNotifications.post(context, testBody, 3) }
+                                    .onFailure { uiMessage = "테스트 알림을 만들지 못했습니다. 앱 알림 권한을 확인하세요." } },
+                                    enabled = permissions.notifications && testBody.isNotBlank()) { Text("연속 알림 3개 만들기") }
+                                TextButton(onClick = { TestNotifications.clear(context) }) { Text("테스트 알림만 지우기") }
+                                Text("TTS 엔진: ${status.engineLabel}")
+                                Text("최근 결과: ${status.lastResult}")
+                                Text("현재 상태: ${status.message}", style = MaterialTheme.typography.bodySmall)
+                                Text("낭독 중 알림센터에서 해당 알림을 옆으로 밀어 지워보세요. 배너만 위로 숨기는 중단은 아직 지원하지 않습니다.", style = MaterialTheme.typography.bodySmall)
+                            } }
+                            item { InfoCard("일부 실기기 확인 · 미리보기 버전", "S26·QCY에서 테스트 음성 청취와 알림을 치웠을 때 중단을 확인했습니다. 유튜브 덕킹, 스피커 전환, 0.5초 중단 지연, 장시간 대기·재부팅은 아직 별도 검증이 필요합니다.") }
                             item { InfoCard("알림 치우기", "알림 자체 삭제에 따른 중단은 구현되어 있습니다. 배너만 숨기는 동작은 수동 숨김과 자동 사라짐을 구분할 근거가 없어 미완료입니다.") }
                             item { InfoCard("배너 숨김 검증 도우미", "선택 기능입니다. 시스템 알림 화면의 이벤트 종류와 횟수만 관찰합니다. 본문을 저장하지 않고, 터치 동작을 바꾸지 않습니다. 배너 숨김 중단 기능은 활성화되지 않습니다.") {
                                 ToggleRow("화면 변화 진단", settings.bannerDiagnostics) { v -> change { it.copy(bannerDiagnostics = v) } }
