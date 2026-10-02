@@ -1,7 +1,10 @@
 param([string]$Repository = 'earbud-companion')
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
-$apk = Join-Path $project 'dist\earbud-companion-0.1.0-preview.apk'
+$buildConfig = [IO.File]::ReadAllText((Join-Path $project 'app\build.gradle.kts'))
+$version = [regex]::Match($buildConfig, 'versionName\s*=\s*"([^"]+)"').Groups[1].Value
+if (!$version) { throw 'versionName is missing.' }
+$apk = Join-Path $project "dist\earbud-companion-$version.apk"
 $hashFile = Join-Path $project 'dist\SHA256SUMS.txt'
 $releaseNotes = Join-Path $project 'docs\RELEASE-NOTES.md'
 if (!(Test-Path -LiteralPath $apk) -or !(Test-Path -LiteralPath $hashFile)) { throw 'Run Build-Release.ps1 before publishing.' }
@@ -36,7 +39,7 @@ try {
     if ($forbidden) { throw 'Private signing/configuration or generated release files were staged. Publishing stopped.' }
     git diff --cached --quiet
     if ($LASTEXITCODE -eq 1) {
-        git -c "user.name=$owner" -c "user.email=$owner@users.noreply.github.com" commit -m 'Build offline headphone notification reader preview'
+        git -c "user.name=$owner" -c "user.email=$owner@users.noreply.github.com" commit -m "Update Earbud Companion $version"
         if ($LASTEXITCODE -ne 0) { throw 'Git commit failed.' }
     }
     $origin = if ('origin' -in @(git remote)) { git remote get-url origin } else { $null }
@@ -44,7 +47,7 @@ try {
     elseif ($origin -ne $repo.clone_url) { throw 'Existing origin points to another repository; it was not changed.' }
     git push -u origin main
     if ($LASTEXITCODE -ne 0) { throw 'Git push failed; no release was created.' }
-    $tag = 'v0.1.0-preview'
+    $tag = "v$version"
     try { $existing = Api 'GET' "$repoUrl/releases/tags/$tag" } catch {
         if ([int]$_.Exception.Response.StatusCode -ne 404) { throw }
         $existing = $null
@@ -53,7 +56,7 @@ try {
     $body = [IO.File]::ReadAllText($releaseNotes, [Text.Encoding]::UTF8)
     $release = if ($existing) { $existing } else {
         Api 'POST' "$repoUrl/releases" @{
-            tag_name = $tag; target_commitish = 'main'; name = 'Earbud Companion 0.1.0 - Hardware-unverified preview'; body = $body; draft = $true; prerelease = $true
+            tag_name = $tag; target_commitish = 'main'; name = "Earbud Companion $version"; body = $body; draft = $true; prerelease = $true
         }
     }
     foreach ($file in @($apk, $hashFile)) {

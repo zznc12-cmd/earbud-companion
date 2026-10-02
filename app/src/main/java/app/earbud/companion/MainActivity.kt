@@ -22,12 +22,18 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -195,7 +201,7 @@ fun EarbudScreen(app: CompanionApp) {
                                     OutlinedButton(onClick = { TimePickerDialog(context, { _, h, m -> change { it.copy(quietStart = h * 60 + m) } }, settings.quietStart / 60, settings.quietStart % 60, true).show() }) { Text("시작 ${clock(settings.quietStart)}") }
                                     OutlinedButton(onClick = { TimePickerDialog(context, { _, h, m -> change { it.copy(quietEnd = h * 60 + m) } }, settings.quietEnd / 60, settings.quietEnd % 60, true).show() }) { Text("종료 ${clock(settings.quietEnd)}") }
                                 }
-                                SettingSlider("본문 길이", settings.maxChars.toFloat(), 20f..1000f, "${settings.maxChars}자") { v -> change { it.copy(maxChars = v.roundToInt()) } }
+                                BodyLengthSetting(settings.maxChars) { v -> change { it.copy(maxChars = v) } }
                             } }
                             item { OutlinedTextField(query, { query = it }, modifier = Modifier.fillMaxWidth(), label = { Text("앱 검색") }, singleLine = true) }
                             items(apps.filter { query.isBlank() || it.label.contains(query, true) }, key = { it.packageName }) { entry ->
@@ -286,6 +292,36 @@ private fun PermissionRow(label: String, ready: Boolean, open: () -> Unit) {
         Text(label, Modifier.weight(1f).padding(top = 10.dp))
         TextButton(onClick = open) { Text(if (ready) "확인됨" else "설정하기") }
     }
+}
+
+@Composable
+private fun BodyLengthSetting(value: Int, change: (Int) -> Unit) {
+    var input by rememberSaveable(value) { mutableStateOf(value.toString()) }
+    val focus = LocalFocusManager.current
+    val number = input.toIntOrNull()?.takeIf { it in 20..1000 }
+    fun apply() {
+        number?.let {
+            change(it)
+            focus.clearFocus()
+        }
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = input,
+            onValueChange = { text -> if (text.length <= 4 && text.all { it in '0'..'9' }) input = text },
+            modifier = Modifier.weight(1f),
+            label = { Text("본문 길이") },
+            suffix = { Text("자") },
+            supportingText = { Text(if (number == null) "20~1,000자를 입력하세요" else "20~1,000자 · 현재 ${value}자") },
+            isError = number == null,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { apply() }),
+        )
+        Button(onClick = { apply() }, enabled = number != null && number != value,
+            modifier = Modifier.padding(top = 8.dp)) { Text("적용") }
+    }
+    SettingSlider("본문 길이", value.toFloat(), 20f..1000f, "${value}자") { change(it.roundToInt()) }
 }
 
 @Composable

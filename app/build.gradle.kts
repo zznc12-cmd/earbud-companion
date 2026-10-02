@@ -14,8 +14,8 @@ android {
         applicationId = "app.earbud.companion"
         minSdk = 33
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-preview"
+        versionCode = 2
+        versionName = "0.1.1-preview"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {

@@ -6,7 +6,10 @@ try {
     & .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleRelease :app:assembleDebugAndroidTest --console=plain
     if ($LASTEXITCODE -ne 0) { throw 'Build or validation failed.' }
     New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
-    $apk = Join-Path $project 'dist\earbud-companion-0.1.0-preview.apk'
+    $buildConfig = [IO.File]::ReadAllText((Join-Path $project 'app\build.gradle.kts'))
+    $version = [regex]::Match($buildConfig, 'versionName\s*=\s*"([^"]+)"').Groups[1].Value
+    if (!$version) { throw 'versionName is missing.' }
+    $apk = Join-Path $project "dist\earbud-companion-$version.apk"
     Copy-Item -LiteralPath 'app\build\outputs\apk\release\app-release.apk' -Destination $apk
     $hash = (Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $project 'dist\SHA256SUMS.txt'), "$hash  $([IO.Path]::GetFileName($apk))`n", [Text.UTF8Encoding]::new($false))
